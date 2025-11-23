@@ -45,19 +45,19 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("Using device:", device)
 
 # ================== System Parameters ==================
-n_ions = 200
+n_ions = 800
 n_cols = 2
 N = n_ions + n_cols
 
 idx_col1 = n_ions      # index of colloid 1
 idx_col2 = n_ions + 1  # index of colloid 2
 
-L_box = 100.0          # box size (square, 2D)
-R_col = 10.0           # center–center separation of colloids
+L_box = 120.0          # box size (square, 2D)
+R_col = 15.0           # center–center separation of colloids
 
 # Hard-sphere radii (used to set Lennard-Jones sigma_ij)
 r_ion = 1.0
-r_col = 1.0
+r_col = 10.0
 
 radii_np = np.zeros(N, dtype=np.float32)
 radii_np[:n_ions] = r_ion
@@ -86,7 +86,7 @@ soft_eps = 1.0  # softening length in sqrt(r^2 + soft_eps^2)
 eps_LJ = 1.0
 
 # Umbrella (harmonic) potential parameters for colloid 2
-k_spring = 300.0           # spring constant
+k_spring = 5000.0           # spring constant
 x0_col2 = R_col / 2.0    # umbrella center (anchor position)
 
 # ================== Utility: PBC ==================
@@ -319,15 +319,15 @@ def leapfrog_step(q: torch.Tensor,
 
 
 # ================== HMC Parameters ==================
-n_hmc_trajectories = 10000
+n_hmc_trajectories = 100000
 hmc_eps = 0.01
 hmc_L = 5
-beta_hmc = 1.0  # effective inverse temperature for momenta
+beta_hmc = 0.5  # effective inverse temperature for momenta
 
 # Masses: ions light, colloid 1 very heavy (fixed), colloid 2 moderately heavy
 m_ion = 1.0
 m_col1 = 1e6
-m_col2 = 1e3
+m_col2 = 1e6
 m_vec = torch.ones(N, device=device)
 m_vec[:n_ions] = m_ion
 m_vec[idx_col1] = m_col1
@@ -347,7 +347,10 @@ def main():
     energies = []
     col2_x_list = []
 
-    for t in range(n_hmc_trajectories):
+    from tqdm import tqdm
+
+    # Progress bar
+    for t in tqdm(range(n_hmc_trajectories), desc="HMC", ncols=80):
         # Sample initial momenta: p ~ N(0, sqrt(m / beta))
         std = torch.sqrt(m_vec / beta_hmc)
         p0 = torch.randn_like(q) * std.view(-1, 1)
@@ -379,11 +382,6 @@ def main():
         energies.append(U_use.item())
         col2_x_list.append(q[idx_col2, 0].item())
 
-        if (t + 1) % 500 == 0:
-            print(
-                f"HMC step {t+1}/{n_hmc_trajectories}, "
-                f"U = {U_use.item():.4f}, dH = {dH:.4e}, acc = {acc_prob:.3f}"
-            )
 
     print("HMC stage finished.")
     print("Final total potential energy (HMC):", energies[-1] if energies else None)
