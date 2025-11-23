@@ -28,13 +28,13 @@
 
 /* ================== System Parameters ================== */
 
-static const int   N_IONS = 200;
+static const int   N_IONS = 800;
 static const int   N_COLS = 2;
-static const float L_BOX  = 100.0f;
-static const float R_COL  = 10.0f;
+static const float L_BOX  = 120.0f;
+static const float R_COL  = 15.0f;
 
 static const float R_ION  = 1.0f;
-static const float R_COLR = 1.0f;
+static const float R_COLR = 10.0f;
 
 static const float Q_ION  = 1.0f;
 static const float Q_COL  = 60.0f;
