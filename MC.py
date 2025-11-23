@@ -1,4 +1,4 @@
-# GPU-accelerated Metropolis MC + HMC with soft-sphere repulsion
+# GPU-accelerated Metropolis MC + HMC with Lennard-Jones soft-sphere repulsion
 # (temperature cycling + per-particle adaptive step sizes)
 
 import numpy as np
@@ -8,7 +8,7 @@ import matplotlib.pyplot as plt
 import matplotlib.animation as animation
 
 """
-This script implements a two-stage sampling scheme for a 2D charged system:
+Two-stage sampling scheme for a 2D charged colloid–ion system:
 
 1. Metropolis Monte Carlo (MC) pre-equilibration
    - Two fixed colloids (oppositely charged)
@@ -23,9 +23,8 @@ This script implements a two-stage sampling scheme for a 2D charged system:
    - Starts from the final configuration of the MC stage
    - All ions move simultaneously (full-vector HMC update)
    - Colloids remain fixed in space
-   - Total potential = softened Coulomb + soft-sphere surface repulsion
-   - Soft-sphere potential smoothly penalizes overlaps:
-       U_rep = 0.5 * k_rep * (r_min - r)^2  for r < r_min, else 0
+   - Total potential = softened Coulomb + Lennard-Jones (12-6) soft-sphere repulsion
+   - LJ parameters chosen such that sigma_ij ~ hard-sphere contact distance
    - Standard leapfrog integrator + Metropolis acceptance
 
 CPU is used only for:
@@ -76,8 +75,10 @@ charge = torch.tensor(charge_np, device=device, dtype=torch.float32)
 k_c = 20.0
 soft_eps = 1.0   # softening length in sqrt(r^2 + soft_eps^2)
 
-# Soft-sphere repulsion (for HMC)
-k_rep = 100.0    # spring constant for soft-sphere surface potential
+# Lennard-Jones parameters for soft-sphere repulsion (HMC only)
+# U_LJ(r) = 4 * eps_LJ * [ (sigma / r)^12 - (sigma / r)^6 ]
+# with sigma_ij chosen from radii[i] + radii[j].
+eps_LJ = 1.0
 
 # ================== Temperature Cycling Parameters (MC) ==================
 beta_low = 1.0    # low-temperature phase (sampling)
@@ -109,15 +110,18 @@ def minimum_image(rij: torch.Tensor) -> torch.Tensor:
     """Apply minimum-image convention for 2D periodic boundaries."""
     return rij - torch.round(rij / L_box) * L_box
 
+
 def wrap_positions(q: torch.Tensor) -> torch.Tensor:
     """Wrap positions into [-L/2, L/2)."""
     return (q + L_box / 2.0) % L_box - L_box / 2.0
 
+
 # ================== Initial Placement on CPU ==================
 def random_place_ions_cpu(n_ions, R_col, safe_factor=1.4, max_attempts=200000):
-    """
-    Randomly place ions inside the periodic box on CPU, avoiding overlaps
-    with colloids and other ions. Used only once at startup.
+    """Randomly place ions inside the periodic box on CPU.
+
+    Overlaps with colloids and existing ions are avoided using a simple
+    rejection scheme. This function is called only once at startup.
     """
     ions = []
 
@@ -167,6 +171,7 @@ def random_place_ions_cpu(n_ions, R_col, safe_factor=1.4, max_attempts=200000):
 
     return np.array(ions), col1, col2
 
+
 # Generate initial coordinates on CPU
 ions_xy_cpu, col1_pos_cpu, col2_pos_cpu = random_place_ions_cpu(n_ions, R_col)
 
@@ -179,6 +184,7 @@ q_np[idx_col2] = col2_pos_cpu
 q = torch.tensor(q_np, device=device, dtype=torch.float32)
 q = wrap_positions(q)
 
+
 # ================== Fix Colloid Positions ==================
 def apply_colloid_constraints(q: torch.Tensor) -> torch.Tensor:
     """Fix colloids to their predefined positions inside the periodic box."""
@@ -186,9 +192,11 @@ def apply_colloid_constraints(q: torch.Tensor) -> torch.Tensor:
     q[idx_col2] = torch.tensor([+R_col / 2.0, 0.0], device=device)
     return q
 
+
 q = apply_colloid_constraints(q)
 
-# ================== Coulomb Energy ==================
+
+# ================== Coulomb Energy (MC & HMC) ==================
 def total_coulomb_energy(q: torch.Tensor) -> torch.Tensor:
     """Compute the total softened Coulomb energy for all particle pairs."""
     U = 0.0
@@ -200,6 +208,7 @@ def total_coulomb_energy(q: torch.Tensor) -> torch.Tensor:
             r_soft = torch.sqrt(r2 + soft_eps**2)
             U = U + k_c * charge[i] * charge[j] / r_soft
     return U
+
 
 def coulomb_energy_of_particle(q: torch.Tensor, i: int) -> torch.Tensor:
     """Compute Coulomb energy contribution of particle i with all others."""
@@ -216,6 +225,7 @@ def coulomb_energy_of_particle(q: torch.Tensor, i: int) -> torch.Tensor:
 
     return torch.sum(pair_E[mask])
 
+
 # ================== Hard-Sphere Overlap Check (MC only) ==================
 def has_overlap_for_particle(q: torch.Tensor, i: int, q_proposed_i: torch.Tensor) -> bool:
     """Return True if the proposed position of particle i overlaps any other."""
@@ -229,6 +239,7 @@ def has_overlap_for_particle(q: torch.Tensor, i: int, q_proposed_i: torch.Tensor
     mask[i] = False
 
     return torch.any(r[mask] < rmin_vec[mask]).item()
+
 
 # ================== MC Stage: Temperature-Cycled Single-Particle MC ==================
 frames_mc = []
@@ -364,22 +375,22 @@ moves_low  = n_cycles * n_sweeps_low  * n_ions
 print("High-T acceptance rate (MC):", accept_count_high / moves_high)
 print("Low-T acceptance rate (MC):",  accept_count_low  / moves_low)
 
-# ================== HMC Stage: Coulomb + Soft-Sphere Repulsion ==================
-"""
-In the HMC stage, we use the final configuration from the MC stage
+
+# ================== HMC Stage: Coulomb + Lennard-Jones Repulsion ==================
+"""In the HMC stage, we use the final configuration from the MC stage
 as the starting point. All ions are updated simultaneously using a
 standard HMC scheme (leapfrog + Metropolis). Colloids remain fixed.
 
 Total potential energy used in HMC:
-  U(q) = U_coulomb(q) + U_soft_sphere(q)
 
-where the soft-sphere surface potential between particles i,j is:
-  U_rep(r_ij) = 0.5 * k_rep * (r_min - r_ij)^2   if r_ij < r_min
-              = 0                                 otherwise
-with r_min = r_i + r_j (sum of hard-sphere radii).
+  U(q) = U_coulomb(q) + U_LJ(q)
 
-This provides a smooth, differentiable repulsion instead of a hard-wall
-overlap rejection, which is more suitable for HMC.
+where the Lennard-Jones potential between particles i,j is:
+
+  U_LJ(r_ij) = 4 eps_LJ [ (sigma_ij / r_ij)^12 - (sigma_ij / r_ij)^6 ],
+
+with sigma_ij chosen as radii[i] + radii[j],
+so that the LJ core roughly coincides with the hard-sphere contact.
 """
 
 # Masses for HMC: finite mass for ions, very large for colloids (effectively fixed)
@@ -389,8 +400,9 @@ m_vec = torch.ones(N, device=device)
 m_vec[:n_ions] = m_ion
 m_vec[idx_col1:] = m_col
 
+
 def total_energy(q: torch.Tensor) -> torch.Tensor:
-    """Total potential energy = softened Coulomb + soft-sphere repulsion."""
+    """Total potential energy = softened Coulomb + Lennard-Jones (12-6)."""
     U = 0.0
     for i in range(N):
         qi = q[i]
@@ -398,27 +410,35 @@ def total_energy(q: torch.Tensor) -> torch.Tensor:
             rij = minimum_image(qi - q[j])
             r2 = torch.dot(rij, rij) + 1e-12
             r = torch.sqrt(r2)
-            r_soft = torch.sqrt(r2 + soft_eps**2)
 
             # Coulomb part
+            r_soft = torch.sqrt(r2 + soft_eps**2)
             U = U + k_c * charge[i] * charge[j] / r_soft
 
-            # Soft-sphere repulsion when r < r_min
-            r_min = radii[i] + radii[j]
-            if r < r_min:
-                U = U + 0.5 * k_rep * (r_min - r) * (r_min - r)
+            # Lennard-Jones part
+            sigma_ij = radii[i] + radii[j]
+            inv_r2 = (sigma_ij * sigma_ij) / r2        # (sigma/r)^2
+            sr6 = inv_r2**3                           # (sigma/r)^6
+            sr12 = sr6 * sr6                          # (sigma/r)^12
+            U = U + 4.0 * eps_LJ * (sr12 - sr6)
 
     return U
 
-def grad_total_energy(q: torch.Tensor) -> torch.Tensor:
-    """
-    Gradient of total potential energy U(q) = U_coulomb + U_soft_sphere.
 
-    For each pair (i,j):
-      - Coulomb contribution as before (from softened 1/r)
-      - Soft-sphere contribution:
-            U_rep = 0.5 * k_rep * (r_min - r)^2   (r < r_min)
-            dU_rep/dr = -k_rep * (r_min - r)
+def grad_total_energy(q: torch.Tensor) -> torch.Tensor:
+    """Gradient of total energy U(q) = U_coulomb + U_LJ.
+
+    For each pair (i, j):
+
+      U_coul = k_c * q_i q_j / sqrt(r^2 + soft_eps^2)
+        => dU_coul/dr as in softened Coulomb
+
+      U_LJ   = 4 eps_LJ [ (sigma/r)^12 - (sigma/r)^6 ]
+        => dU_LJ/dr = 24 eps_LJ / r * ( (sigma/r)^6 - 2 (sigma/r)^12 )
+
+    The gradient contribution on particle i is:
+      grad_i U = dU/dr * (r_ij / r)
+    and on particle j is the opposite.
     """
     grad = torch.zeros_like(q)
 
@@ -427,23 +447,25 @@ def grad_total_energy(q: torch.Tensor) -> torch.Tensor:
             rij = minimum_image(q[i] - q[j])
             r2 = torch.dot(rij, rij) + 1e-12
             r = torch.sqrt(r2)
+
+            # ---------- Coulomb part ----------
             r_soft2 = r2 + soft_eps**2
             r_soft = torch.sqrt(r_soft2)
-
-            # Coulomb part
             dU_dr_c = -k_c * charge[i] * charge[j] / r_soft2 * (r / r_soft)
-            # Avoid division by zero
             force_ij_coul = dU_dr_c * (rij / r)
 
-            # Soft-sphere part (only if r < r_min)
-            r_min = radii[i] + radii[j]
-            if r < r_min:
-                dU_dr_rep = -k_rep * (r_min - r)   # derivative wrt r
-                force_ij_rep = dU_dr_rep * (rij / r)
-            else:
-                force_ij_rep = 0.0 * rij  # zero vector
+            # ---------- Lennard-Jones part ----------
+            sigma_ij = radii[i] + radii[j]
+            inv_r2 = (sigma_ij * sigma_ij) / r2   # (sigma/r)^2
+            sr6 = inv_r2**3                       # (sigma/r)^6
+            sr12 = sr6 * sr6                      # (sigma/r)^12
 
-            force_ij = force_ij_coul + force_ij_rep
+            # dU_LJ/dr = 24 eps_LJ / r * ( (sigma/r)^6 - 2 (sigma/r)^12 )
+            dU_dr_LJ = (24.0 * eps_LJ / r) * (sr6 - 2.0 * sr12)
+            force_ij_LJ = dU_dr_LJ * (rij / r)
+
+            # Total pairwise contribution
+            force_ij = force_ij_coul + force_ij_LJ
 
             grad[i] += force_ij
             grad[j] -= force_ij
@@ -454,9 +476,11 @@ def grad_total_energy(q: torch.Tensor) -> torch.Tensor:
 
     return grad
 
+
 def kinetic_energy(p: torch.Tensor) -> torch.Tensor:
     """Kinetic energy: sum_i p_i^2 / (2 m_i)."""
     return 0.5 * torch.sum(torch.sum(p * p, dim=1) / m_vec)
+
 
 def leapfrog_step(q: torch.Tensor, p: torch.Tensor, eps: float, L: int):
     """Perform L leapfrog steps for the HMC trajectory."""
@@ -473,7 +497,7 @@ def leapfrog_step(q: torch.Tensor, p: torch.Tensor, eps: float, L: int):
         q = wrap_positions(q)
         q = apply_colloid_constraints(q)
 
-        # Full step in p (except after the last step, where we already did half-step)
+        # Full step in p (except after the last step)
         if step != L - 1:
             gradU = grad_total_energy(q)
             p = p - eps * gradU
@@ -490,6 +514,7 @@ def leapfrog_step(q: torch.Tensor, p: torch.Tensor, eps: float, L: int):
     p[idx_col2] = 0.0
 
     return q, p
+
 
 # ---------- HMC Parameters ----------
 n_hmc_trajectories = 400
@@ -537,6 +562,7 @@ for t in range(n_hmc_trajectories):
 print("HMC stage finished.")
 print("Final total potential energy (HMC):", energies_hmc[-1] if energies_hmc else None)
 
+
 # ================== Animation (HMC Stage) ==================
 frames = np.array(frames_hmc)
 n_frames = frames.shape[0]
@@ -547,16 +573,18 @@ ax.set_xlim(-L_box / 2, L_box / 2)
 ax.set_ylim(-L_box / 2, L_box / 2)
 ax.set_xlabel("x")
 ax.set_ylabel("y")
-ax.set_title("HMC sampling (Coulomb + soft-sphere repulsion)")
+ax.set_title("HMC sampling (Coulomb + Lennard-Jones)")
 
 ion_scat = ax.scatter([], [], s=20, c='tab:blue', label='ions')
 col_scat = ax.scatter([], [], s=300, c='tab:red', label='colloids')
 ax.legend(loc='upper right')
 
+
 def init():
     ion_scat.set_offsets(np.empty((0, 2)))
     col_scat.set_offsets(np.empty((0, 2)))
     return ion_scat, col_scat
+
 
 def update(frame_idx):
     pos = frames[frame_idx]
@@ -565,6 +593,7 @@ def update(frame_idx):
     ion_scat.set_offsets(ions)
     col_scat.set_offsets(cols)
     return ion_scat, col_scat
+
 
 ani = animation.FuncAnimation(
     fig,
