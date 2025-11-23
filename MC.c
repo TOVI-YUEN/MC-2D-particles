@@ -383,8 +383,8 @@ int main(void) {
                         sigma[i] *= ADAPT_GROW;
                         if (sigma[i] > SIGMA_MAX) sigma[i] = SIGMA_MAX;
                     }
-                    printf("[HighT adapt ion %d] cycle=%d, acc_rate=%.3f, sigma=%.3f\n",
-                           i, cycle, acc_rate_i, sigma[i]);
+          //          printf("[HighT adapt ion %d] cycle=%d, acc_rate=%.3f, sigma=%.3f\n",
+           //                i, cycle, acc_rate_i, sigma[i]);
                     window_accept[i] = 0;
                     window_total[i]  = 0;
                 }
@@ -452,8 +452,8 @@ int main(void) {
                         sigma[i] *= ADAPT_GROW;
                         if (sigma[i] > SIGMA_MAX) sigma[i] = SIGMA_MAX;
                     }
-                    printf("[LowT adapt ion %d] cycle=%d, acc_rate=%.3f, sigma=%.3f\n",
-                           i, cycle, acc_rate_i, sigma[i]);
+            //        printf("[LowT adapt ion %d] cycle=%d, acc_rate=%.3f, sigma=%.3f\n",
+             //              i, cycle, acc_rate_i, sigma[i]);
                     window_accept[i] = 0;
                     window_total[i]  = 0;
                 }
