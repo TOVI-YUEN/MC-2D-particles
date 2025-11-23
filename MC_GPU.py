@@ -373,7 +373,8 @@ def visualize(frames: np.ndarray):
         col_scat.set_offsets(cols)
         return ion_scat, col_scat
 
-    animation.FuncAnimation(
+    
+    ani = animation.FuncAnimation(
         fig,
         update,
         frames=n_frames,
@@ -384,6 +385,8 @@ def visualize(frames: np.ndarray):
 
     plt.tight_layout()
     plt.show()
+
+
 
 
 if __name__ == "__main__":
